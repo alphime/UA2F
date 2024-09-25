@@ -178,13 +178,10 @@ bool should_ignore(const struct nf_packet *pkt) {
     当空格不够且没有括号，会保留原始UA 返回false，为什么这么做呢？因为提升大部分应用兼容性
     ? syslog会出现空指针异常？？？
 */
-bool append_origin_UA(char *ua_start, int ua_len, char *replacement_user_agent_string) {
+bool append_origin_UA(char *ua_start, unsigned int ua_len, char *replacement_user_agent_string, char *result_ua_string) {
     char *ua_copy = replacement_user_agent_string;
     bool is_bracket_inner = false;
-    const int fixed_ua_len = (0xffff > ua_len) ? ua_len : 0xffff;
-    //syslog(LOG_DEBUG, "Perpare handle UA append: %s; ualen: %d", ua_start, ua_len);
-    // 
-    // 
+    strncpy(result_ua_string, replacement_user_agent_string, ua_len);
     // replacement_user_agent_replace_len: -1 未处理； -2 不开启UA后缀补充； >0 开启UA后缀补充，值为replacement_user_agent_string长度（不包含`...`）。
     if (replacement_user_agent_replace_len == -1) {
         replacement_user_agent_replace_len = 0;
@@ -224,19 +221,13 @@ bool append_origin_UA(char *ua_start, int ua_len, char *replacement_user_agent_s
     ua_copy = ua_start;
     is_bracket_inner = false;
     bool has_find_bracket = false;
-    for (int i = 0, s_blank = 0; i < fixed_ua_len; i++)
+    unsigned int copy_part_ua_len = 0;      // 复制后面部分的ua长度
+    for (int i = 0, s_blank = 0; i < ua_len; i++)
     {
         if (s_blank == replacement_user_agent_blank_record) {
-            // replacement_user_agent_replace_len + copy_len < fix_ua_len
-            int copy_len = fixed_ua_len - ((replacement_user_agent_replace_len < i) ? i : replacement_user_agent_replace_len);
-            if (copy_len <= 0)
-                break;
-            strncpy(replacement_user_agent_string + replacement_user_agent_replace_len, ua_copy, copy_len);
-            const int offset_fill_blank = copy_len + replacement_user_agent_replace_len;
-            if (offset_fill_blank < fixed_ua_len) {
-                memset(replacement_user_agent_string + offset_fill_blank, ' ', fixed_ua_len - offset_fill_blank);
-            }
-            return true;
+            // replacement_user_agent_replace_len + copy_part_ua_len < fix_ua_len
+            copy_part_ua_len = ua_len - ((replacement_user_agent_replace_len < i) ? i : replacement_user_agent_replace_len);
+            break;
         }
 
         if (*ua_copy == '(') {
@@ -252,11 +243,19 @@ bool append_origin_UA(char *ua_start, int ua_len, char *replacement_user_agent_s
         }
         ua_copy++;
     }
-    if (has_find_bracket && fixed_ua_len > replacement_user_agent_replace_len) {
+
+    if (copy_part_ua_len > 0) {
+        strncpy(result_ua_string + replacement_user_agent_replace_len, ua_copy, copy_part_ua_len);
+        const int offset_fill_blank = copy_part_ua_len + replacement_user_agent_replace_len;
+        if (offset_fill_blank < ua_len)
+            memset(result_ua_string + offset_fill_blank, ' ', ua_len - offset_fill_blank);
+        return true;
+    }
+    
+    if (has_find_bracket) {
         // 补齐空格，如结果为`Mozilla/5.0 (Linux; Android 14; x64) `
-        if (fixed_ua_len > replacement_user_agent_replace_len)
-            memset(replacement_user_agent_string + replacement_user_agent_replace_len, ' ', fixed_ua_len - replacement_user_agent_replace_len);
-        memset(replacement_user_agent_string + replacement_user_agent_replace_len, ' ', fixed_ua_len - replacement_user_agent_replace_len);
+        if (ua_len > replacement_user_agent_replace_len)
+            memset(result_ua_string + replacement_user_agent_replace_len, ' ', ua_len - replacement_user_agent_replace_len);
         return true;
     }
     return false;
@@ -383,15 +382,16 @@ void handle_packet(const struct nf_queue *queue, const struct nf_packet *pkt) {
         const unsigned int ua_len = ua_end - ua_start;
         const unsigned long ua_offset = ua_start - tcp_payload;
 
-        bool needed_replace =  append_origin_UA(ua_start, ua_len, replacement_user_agent_string);
+        char new_ua_string[ua_len];
+        bool needed_replace =  append_origin_UA(ua_start, ua_len, replacement_user_agent_string, new_ua_string);
         if (needed_replace) {
             //syslog(LOG_INFO, "Using disposed UA: %s", replacement_user_agent_string);
 
             // Looks it's impossible to mangle packet failed, so we just drop it
             if (type == IPV4) {
-                nfq_tcp_mangle_ipv4(pkt_buff, ua_offset, ua_len, replacement_user_agent_string, ua_len);
+                nfq_tcp_mangle_ipv4(pkt_buff, ua_offset, ua_len, new_ua_string, ua_len);
             } else {
-                nfq_tcp_mangle_ipv6(pkt_buff, ua_offset, ua_len, replacement_user_agent_string, ua_len);
+                nfq_tcp_mangle_ipv6(pkt_buff, ua_offset, ua_len, new_ua_string, ua_len);
             }
         } else {
             //syslog(LOG_INFO, "Using disposed origin UA");
