@@ -230,10 +230,12 @@ int get_pkt_ip_version(const struct nf_packet *pkt) {
     当空格不够且没有括号，会保留原始UA 返回false，为什么这么做呢？因为提升大部分应用兼容性
     ? syslog会出现空指针异常？？？
 */
-bool append_origin_UA(char *ua_start, unsigned int ua_len, char *replacement_user_agent_string, char *result_ua_string) {
+bool append_origin_UA(char *ua_start, unsigned int ua_len, char *result_ua_string) {
     char *ua_copy = replacement_user_agent_string;
-    bool is_bracket_inner = false;
-    strncpy(result_ua_string, replacement_user_agent_string, ua_len);
+    char assign_last_char = 0;
+    if (ua_len <= 0)
+        return false;
+    strncpy(result_ua_string, replacement_user_agent_string, (ua_len > replacement_user_agent_replace_len ? replacement_user_agent_replace_len : ua_len));
     // replacement_user_agent_replace_len: -1 未处理； -2 不开启UA后缀补充； >0 开启UA后缀补充，值为replacement_user_agent_string长度（不包含`...`）。
     if (replacement_user_agent_replace_len == -1) {
         replacement_user_agent_replace_len = 0;
@@ -242,7 +244,7 @@ bool append_origin_UA(char *ua_start, unsigned int ua_len, char *replacement_use
         {
             char c = *ua_copy;
             if (c == ' ') {
-                if (!is_bracket_inner)
+                if (assign_last_char != '(')
                     replacement_user_agent_blank_record++;      // 记录UA空格
                 // 当出现` ...`时，开启UA后缀补充
                 if (*(ua_copy + 1) == '.' && *(ua_copy + 2) == '.' && *(ua_copy + 3) == '.') {
@@ -251,10 +253,8 @@ bool append_origin_UA(char *ua_start, unsigned int ua_len, char *replacement_use
                     break;
                 }
             }
-            else if (c == '(') {
-                is_bracket_inner = true;
-            } else if (c == ')') {
-                is_bracket_inner = false;
+            else if (c == '(' || c == ')') {
+                assign_last_char = c;
             }
             
             ua_copy++;
@@ -271,9 +271,9 @@ bool append_origin_UA(char *ua_start, unsigned int ua_len, char *replacement_use
     // 后续代码是拼接 replacement_user_agent_string + ua_start的第replacement_user_agent_blank_record空格之后的内容并存到replacement_user_agent_string
     
     ua_copy = ua_start;
-    is_bracket_inner = false;
+    assign_last_char = 0;       // 在这里 assign_last_char 一旦检测到'('，将会暂停记录上一次的字符，直到检测到')'
     bool has_find_bracket = false;
-    unsigned int copy_part_ua_len = 0;      // 复制后面部分的ua长度
+    int copy_part_ua_len = 0;      // 复制后面部分的ua长度（值有可能小于0！）
     for (int i = 0, s_blank = 0; i < ua_len; i++)
     {
         if (s_blank == replacement_user_agent_blank_record) {
@@ -282,17 +282,21 @@ bool append_origin_UA(char *ua_start, unsigned int ua_len, char *replacement_use
             break;
         }
 
-        if (*ua_copy == '(') {
-            is_bracket_inner = true;
-        } else if (*ua_copy == ')') {
-            if (is_bracket_inner)
+        if (*ua_copy == '(' || *ua_copy == ')') {
+            if (assign_last_char != *ua_copy)
                 has_find_bracket = true;
-            is_bracket_inner = false;
+            assign_last_char = *ua_copy;
         }
 
-        if (*ua_copy == ' ' && !is_bracket_inner) {
-            s_blank++;
+        else {
+            if (*ua_copy == ' ' && assign_last_char != '(' && assign_last_char != ' ') {
+                s_blank++;
+            }
+
+            if (assign_last_char != '(')
+                assign_last_char = *ua_copy;
         }
+
         ua_copy++;
     }
 
@@ -422,12 +426,13 @@ void handle_packet(const struct nf_queue *queue, const struct nf_packet *pkt) {
         const unsigned int ua_len = ua_end - ua_start;
         const unsigned long ua_offset = ua_start - tcp_payload;
 
-        char new_ua_string[ua_len];
-        bool needed_replace =  append_origin_UA(ua_start, ua_len, replacement_user_agent_string, new_ua_string);
-        if (needed_replace) {
-            //syslog(LOG_INFO, "Using disposed UA: %s", replacement_user_agent_string);
+        // syslog(LOG_INFO, "Origin UA: %s", ua_start);
 
-            // Looks it's impossible to mangle packet failed, so we just drop it
+        char new_ua_string[ua_len + 1];
+        new_ua_string[ua_len] = 0;
+        bool needed_replace =  append_origin_UA(ua_start, ua_len, new_ua_string);
+        if (needed_replace) {
+           // Looks it's impossible to mangle packet failed, so we just drop it
             if (type == IPV4) {
 <<<<<<< HEAD
                 nfq_tcp_mangle_ipv4(pkt_buff, ua_offset, ua_len, replacement_user_agent_string, ua_len);
@@ -440,7 +445,10 @@ void handle_packet(const struct nf_queue *queue, const struct nf_packet *pkt) {
 >>>>>>> 7a21d36 (修复高并发引起的写入无效问题)
             }
         } else {
-            //syslog(LOG_INFO, "Using disposed origin UA");
+            // strncpy(new_ua_string, ua_start, ua_len);
+            // syslog(LOG_INFO, "Using disposed origin UA: %s", new_ua_string);
+            if (ua_len <= 0)
+                syslog(LOG_INFO, "Origin UA empty!");
         }
 
         search_length = tcp_payload_len - (ua_end - tcp_payload);
