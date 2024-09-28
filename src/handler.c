@@ -33,6 +33,8 @@ static unsigned int replacement_user_agent_blank_record = 0;
 bool use_conntrack = true;
 static bool cache_initialized = false;
 
+void calculate_replacement_user_agent_string_len();
+
 void init_handler() {
     replacement_user_agent_string = malloc(MAX_USER_AGENT_LENGTH);
 
@@ -66,7 +68,39 @@ void init_handler() {
         syslog(LOG_INFO, "Custom user agent string not set, using default F-string.");
     }
 
+    calculate_replacement_user_agent_string_len();
     syslog(LOG_INFO, "Handler initialized.");
+}
+
+void calculate_replacement_user_agent_string_len() {
+    bool is_bracket_inner = false;
+    bool find_append_symbol = false;        // 找到UA后缀补充标识符
+    char *ua_pointer = replacement_user_agent_string;
+    while (*ua_pointer != 0)
+    {
+        char c = *ua_pointer;
+        if (c == ' ') {
+            if (!is_bracket_inner)
+                replacement_user_agent_blank_record++;      // 记录UA空格
+            // 当出现` ...`时，开启UA后缀补充
+            if (*(ua_pointer + 1) == '.' && *(ua_pointer + 2) == '.' && *(ua_pointer + 3) == '.') {
+                replacement_user_agent_replace_len += 2;
+                find_append_symbol = true;
+                break;
+            }
+        }
+        else if (c == '(') {
+            is_bracket_inner = true;
+        }
+        else if (c == ')') {
+            is_bracket_inner = false;
+        }
+        
+        ua_pointer++;
+        replacement_user_agent_replace_len++;       // 计算replacement_user_agent_string长度（不包含`...`）
+    }
+    if (!find_append_symbol)
+        replacement_user_agent_replace_len = -2;
 }
 
 struct mark_op {
@@ -180,37 +214,10 @@ bool should_ignore(const struct nf_packet *pkt) {
 */
 bool append_origin_UA(char *ua_start, unsigned int ua_len, char *result_ua_string) {
     char *ua_copy = replacement_user_agent_string;
-    char assign_last_char = 0;
+    bool is_bracket_inner = false;       // 在这里 assign_last_char 一旦检测到'('，将会暂停记录上一次的字符，直到检测到')'
     if (ua_len <= 0)
         return false;
     strncpy(result_ua_string, replacement_user_agent_string, (ua_len > replacement_user_agent_replace_len ? replacement_user_agent_replace_len : ua_len));
-    // replacement_user_agent_replace_len: -1 未处理； -2 不开启UA后缀补充； >0 开启UA后缀补充，值为replacement_user_agent_string长度（不包含`...`）。
-    if (replacement_user_agent_replace_len == -1) {
-        replacement_user_agent_replace_len = 0;
-        bool find_append_symbol = false;        // 找到UA后缀补充标识符
-        while (*ua_copy != 0)
-        {
-            char c = *ua_copy;
-            if (c == ' ') {
-                if (assign_last_char != '(')
-                    replacement_user_agent_blank_record++;      // 记录UA空格
-                // 当出现` ...`时，开启UA后缀补充
-                if (*(ua_copy + 1) == '.' && *(ua_copy + 2) == '.' && *(ua_copy + 3) == '.') {
-                    replacement_user_agent_replace_len++;
-                    find_append_symbol = true;
-                    break;
-                }
-            }
-            else if (c == '(' || c == ')') {
-                assign_last_char = c;
-            }
-            
-            ua_copy++;
-            replacement_user_agent_replace_len++;       // 计算replacement_user_agent_string长度（不包含`...`）
-        }
-        if (!find_append_symbol)
-            replacement_user_agent_replace_len = -2;
-    }
 
     if (replacement_user_agent_replace_len <= 0) {
         return true;
@@ -219,7 +226,6 @@ bool append_origin_UA(char *ua_start, unsigned int ua_len, char *result_ua_strin
     // 后续代码是拼接 replacement_user_agent_string + ua_start的第replacement_user_agent_blank_record空格之后的内容并存到replacement_user_agent_string
     
     ua_copy = ua_start;
-    assign_last_char = 0;       // 在这里 assign_last_char 一旦检测到'('，将会暂停记录上一次的字符，直到检测到')'
     bool has_find_bracket = false;
     int copy_part_ua_len = 0;      // 复制后面部分的ua长度（值有可能小于0！）
     for (int i = 0, s_blank = 0; i < ua_len; i++)
@@ -230,19 +236,16 @@ bool append_origin_UA(char *ua_start, unsigned int ua_len, char *result_ua_strin
             break;
         }
 
-        if (*ua_copy == '(' || *ua_copy == ')') {
-            if (assign_last_char != *ua_copy)
-                has_find_bracket = true;
-            assign_last_char = *ua_copy;
+        if (*ua_copy == '(') {
+            is_bracket_inner = true;
+            has_find_bracket = true;
+        }
+        else if (*ua_copy == ')') {
+            is_bracket_inner = false;
         }
 
-        else {
-            if (*ua_copy == ' ' && assign_last_char != '(' && assign_last_char != ' ') {
-                s_blank++;
-            }
-
-            if (assign_last_char != '(')
-                assign_last_char = *ua_copy;
+        else if (!is_bracket_inner && *ua_copy == ' ' && *(ua_copy + 1) != ' ') {
+            s_blank++;
         }
 
         ua_copy++;
@@ -257,7 +260,7 @@ bool append_origin_UA(char *ua_start, unsigned int ua_len, char *result_ua_strin
     }
     
     if (has_find_bracket) {
-        // 补齐空格，如结果为`Mozilla/5.0 (Linux; Android 14; x64) `
+        // 补齐空格，如结果为`Mozilla/5.0 (Linux; Android 14; x64)       `
         if (ua_len > replacement_user_agent_replace_len)
             memset(result_ua_string + replacement_user_agent_replace_len, ' ', ua_len - replacement_user_agent_replace_len);
         return true;
@@ -378,12 +381,13 @@ void handle_packet(const struct nf_queue *queue, const struct nf_packet *pkt) {
         }
 
         const void *ua_end = memchr(ua_start, '\r', tcp_payload_len - (ua_start - tcp_payload));
+
         if (ua_end == NULL) {
             syslog(LOG_INFO, "User-Agent header is not terminated with \\r, not mangled.");
-            send_verdict(queue, pkt, get_next_mark(pkt, true), NULL);
-            goto end;
+            // send_verdict(queue, pkt, get_next_mark(pkt, true), NULL);
+            // goto end;
         }
-        const unsigned int ua_len = ua_end - ua_start;
+        const unsigned int ua_len = (ua_end != NULL) ? (ua_end - ua_start) : (tcp_payload_len - (ua_start - tcp_payload));
         const unsigned long ua_offset = ua_start - tcp_payload;
 
         // syslog(LOG_INFO, "Origin UA: %s", ua_start);
@@ -405,6 +409,9 @@ void handle_packet(const struct nf_queue *queue, const struct nf_packet *pkt) {
                 syslog(LOG_INFO, "Origin UA empty!");
         }
 
+        if (ua_end == NULL) {
+            break;
+        }
         search_length = tcp_payload_len - (ua_end - tcp_payload);
         search_start = ua_end;
     }
