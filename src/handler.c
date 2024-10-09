@@ -292,9 +292,20 @@ void handle_packet(const struct nf_queue *queue, const struct nf_packet *pkt) {
 
     int type;
 
-    if (use_conntrack) {
-        type = pkt->orig.ip_version;
-    } else {
+    // if (use_conntrack) {
+    //     type = pkt->orig.ip_version;
+    // } else {
+    //     const __auto_type ip_hdr = nfq_ip_get_hdr(pkt_buff);
+    //     if (ip_hdr == NULL) {
+    //         type = IPV6;
+    //     } else {
+    //         type = IPV4;
+    //     }
+    // }
+    type = pkt->orig.ip_version;
+
+    if (!use_conntrack && type == 0) {
+        syslog(LOG_INFO, "try to get ip type through hdr");
         const __auto_type ip_hdr = nfq_ip_get_hdr(pkt_buff);
         if (ip_hdr == NULL) {
             type = IPV6;
@@ -382,8 +393,8 @@ void handle_packet(const struct nf_queue *queue, const struct nf_packet *pkt) {
 
         const void *ua_end = memchr(ua_start, '\r', tcp_payload_len - (ua_start - tcp_payload));
 
-        if (ua_end == NULL) {
-            syslog(LOG_INFO, "User-Agent header is not terminated with \\r, not mangled.");
+        if (ua_end == NULL) {               // this is incomplete UA
+            syslog(LOG_INFO, "User-Agent header is not terminated with \\r, mangled to the end.");
             // send_verdict(queue, pkt, get_next_mark(pkt, true), NULL);
             // goto end;
         }
@@ -403,10 +414,8 @@ void handle_packet(const struct nf_queue *queue, const struct nf_packet *pkt) {
                 nfq_tcp_mangle_ipv6(pkt_buff, ua_offset, ua_len, new_ua_string, ua_len);
             }
         } else {
-            // strncpy(new_ua_string, ua_start, ua_len);
-            // syslog(LOG_INFO, "Using disposed origin UA: %s", new_ua_string);
-            if (ua_len <= 0)
-                syslog(LOG_INFO, "Origin UA empty!");
+            // if (ua_len <= 0)
+            //     syslog(LOG_INFO, "empty UA!");
         }
 
         if (ua_end == NULL) {
