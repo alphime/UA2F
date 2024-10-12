@@ -40,8 +40,6 @@ bool use_conntrack = false;
 
 static bool cache_initialized = false;
 
-void calculate_replacement_user_agent_string_len();
-
 void init_handler() {
     replacement_user_agent_string = malloc(MAX_USER_AGENT_LENGTH);
 
@@ -75,39 +73,7 @@ void init_handler() {
         syslog(LOG_INFO, "Custom user agent string not set, using default F-string.");
     }
 
-    calculate_replacement_user_agent_string_len();
     syslog(LOG_INFO, "Handler initialized.");
-}
-
-void calculate_replacement_user_agent_string_len() {
-    bool is_bracket_inner = false;
-    bool find_append_symbol = false;        // 找到UA后缀补充标识符
-    char *ua_pointer = replacement_user_agent_string;
-    while (*ua_pointer != 0)
-    {
-        char c = *ua_pointer;
-        if (c == ' ') {
-            if (!is_bracket_inner)
-                replacement_user_agent_blank_record++;      // 记录UA空格
-            // 当出现` ...`时，开启UA后缀补充
-            if (*(ua_pointer + 1) == '.' && *(ua_pointer + 2) == '.' && *(ua_pointer + 3) == '.') {
-                replacement_user_agent_replace_len += 2;
-                find_append_symbol = true;
-                break;
-            }
-        }
-        else if (c == '(') {
-            is_bracket_inner = true;
-        }
-        else if (c == ')') {
-            is_bracket_inner = false;
-        }
-        
-        ua_pointer++;
-        replacement_user_agent_replace_len++;       // 计算replacement_user_agent_string长度（不包含`...`）
-    }
-    if (!find_append_symbol)
-        replacement_user_agent_replace_len = -2;
 }
 
 struct mark_op {
@@ -264,12 +230,42 @@ int get_pkt_ip_version(const struct nf_packet *pkt) {
     当空格不够且没有括号，会保留原始UA 返回false，为什么这么做呢？因为提升大部分应用兼容性
     ? syslog会出现空指针异常？？？
 */
-bool append_origin_UA(char *ua_start, unsigned int ua_len, char *result_ua_string) {
+bool append_origin_UA(char *ua_start, int ua_len, char *replacement_user_agent_string) {
     char *ua_copy = replacement_user_agent_string;
-    bool is_bracket_inner = false;       // 在这里 assign_last_char 一旦检测到'('，将会暂停记录上一次的字符，直到检测到')'
-    if (ua_len <= 0)
-        return false;
-    strncpy(result_ua_string, replacement_user_agent_string, (ua_len > replacement_user_agent_replace_len ? replacement_user_agent_replace_len : ua_len));
+    bool is_bracket_inner = false;
+    const int fixed_ua_len = (0xffff > ua_len) ? ua_len : 0xffff;
+    //syslog(LOG_DEBUG, "Perpare handle UA append: %s; ualen: %d", ua_start, ua_len);
+    // 
+    // 
+    // replacement_user_agent_replace_len: -1 未处理； -2 不开启UA后缀补充； >0 开启UA后缀补充，值为replacement_user_agent_string长度（不包含`...`）。
+    if (replacement_user_agent_replace_len == -1) {
+        replacement_user_agent_replace_len = 0;
+        bool find_append_symbol = false;        // 找到UA后缀补充标识符
+        while (*ua_copy != 0)
+        {
+            char c = *ua_copy;
+            if (c == ' ') {
+                if (!is_bracket_inner)
+                    replacement_user_agent_blank_record++;      // 记录UA空格
+                // 当出现` ...`时，开启UA后缀补充
+                if (*(ua_copy + 1) == '.' && *(ua_copy + 2) == '.' && *(ua_copy + 3) == '.') {
+                    replacement_user_agent_replace_len++;
+                    find_append_symbol = true;
+                    break;
+                }
+            }
+            else if (c == '(') {
+                is_bracket_inner = true;
+            } else if (c == ')') {
+                is_bracket_inner = false;
+            }
+            
+            ua_copy++;
+            replacement_user_agent_replace_len++;       // 计算replacement_user_agent_string长度（不包含`...`）
+        }
+        if (!find_append_symbol)
+            replacement_user_agent_replace_len = -2;
+    }
 
     if (replacement_user_agent_replace_len <= 0) {
         return true;
@@ -278,52 +274,40 @@ bool append_origin_UA(char *ua_start, unsigned int ua_len, char *result_ua_strin
     // 后续代码是拼接 replacement_user_agent_string + ua_start的第replacement_user_agent_blank_record空格之后的内容并存到replacement_user_agent_string
     
     ua_copy = ua_start;
+    is_bracket_inner = false;
     bool has_find_bracket = false;
-    int copy_part_ua_len = 0;      // 复制后面部分的ua长度（值有可能小于0！）
-    for (int i = 0, s_blank = 0; i < ua_len; i++)
+    for (int i = 0, s_blank = 0; i < fixed_ua_len; i++)
     {
         if (s_blank == replacement_user_agent_blank_record) {
-            // replacement_user_agent_replace_len + copy_part_ua_len < fix_ua_len
-            copy_part_ua_len = ua_len - ((replacement_user_agent_replace_len < i) ? i : replacement_user_agent_replace_len);
-            break;
+            // replacement_user_agent_replace_len + copy_len < fix_ua_len
+            int copy_len = fixed_ua_len - ((replacement_user_agent_replace_len < i) ? i : replacement_user_agent_replace_len);
+            if (copy_len <= 0)
+                break;
+            strncpy(replacement_user_agent_string + replacement_user_agent_replace_len, ua_copy, copy_len);
+            const int offset_fill_blank = copy_len + replacement_user_agent_replace_len;
+            if (offset_fill_blank < fixed_ua_len) {
+                memset(replacement_user_agent_string + offset_fill_blank, ' ', fixed_ua_len - offset_fill_blank);
+            }
+            return true;
         }
 
         if (*ua_copy == '(') {
             is_bracket_inner = true;
-            has_find_bracket = true;
-        }
-        else if (*ua_copy == ')') {
+        } else if (*ua_copy == ')') {
+            if (is_bracket_inner)
+                has_find_bracket = true;
             is_bracket_inner = false;
         }
 
-        else if (!is_bracket_inner && *ua_copy == ' ' && *(ua_copy + 1) != ' ') {
+        if (*ua_copy == ' ' && !is_bracket_inner) {
             s_blank++;
         }
-
         ua_copy++;
     }
-
-    if (copy_part_ua_len > 0) {
-        strncpy(result_ua_string + replacement_user_agent_replace_len, ua_copy, copy_part_ua_len);
-        const int offset_fill_blank = copy_part_ua_len + replacement_user_agent_replace_len;
-        if (offset_fill_blank < ua_len)
-            memset(result_ua_string + offset_fill_blank, ' ', ua_len - offset_fill_blank);
-        return true;
-    }
-    
-    if (has_find_bracket) {
-<<<<<<< HEAD
+    if (has_find_bracket && fixed_ua_len > replacement_user_agent_replace_len) {
         // 补齐空格，如结果为`Mozilla/5.0 (Linux; Android 14; x64) `
-<<<<<<< HEAD
         char *copy_start = replacement_user_agent_string + replacement_user_agent_replace_len;
         memset(copy_start, ' ', fixed_ua_len - replacement_user_agent_replace_len);
-=======
-=======
-        // 补齐空格，如结果为`Mozilla/5.0 (Linux; Android 14; x64)       `
->>>>>>> 8aa68f8 (Fixed device exposure in the unfinished request header containing UA)
-        if (ua_len > replacement_user_agent_replace_len)
-            memset(result_ua_string + replacement_user_agent_replace_len, ' ', ua_len - replacement_user_agent_replace_len);
->>>>>>> 7a21d36 (修复高并发引起的写入无效问题)
         return true;
     }
     return false;
@@ -348,36 +332,11 @@ void handle_packet(const struct nf_queue *queue, const struct nf_packet *pkt) {
         goto end;
     }
 
-<<<<<<< HEAD
     const int type = get_pkt_ip_version(pkt);
     if (type == IP_UNK) {
         // will this happen?
         send_verdict(queue, pkt, get_next_mark(pkt, false), NULL);
         syslog(LOG_WARNING, "Received unknown ip packet %x. You may set wrong firewall rules.", pkt->hw_protocol);
-=======
-    int type;
-
-    // if (use_conntrack) {
-    //     type = pkt->orig.ip_version;
-    // } else {
-    //     const __auto_type ip_hdr = nfq_ip_get_hdr(pkt_buff);
-    //     if (ip_hdr == NULL) {
-    //         type = IPV6;
-    //     } else {
-    //         type = IPV4;
-    //     }
-    // }
-    type = pkt->orig.ip_version;
-
-    if (!use_conntrack && type == 0) {
-        syslog(LOG_INFO, "try to get ip type through hdr");
-        const __auto_type ip_hdr = nfq_ip_get_hdr(pkt_buff);
-        if (ip_hdr == NULL) {
-            type = IPV6;
-        } else {
-            type = IPV4;
-        }
->>>>>>> 7439027 (optimization)
     }
 
     if (type == IPV4) {
@@ -450,41 +409,28 @@ void handle_packet(const struct nf_queue *queue, const struct nf_packet *pkt) {
         }
 
         const void *ua_end = memchr(ua_start, '\r', tcp_payload_len - (ua_start - tcp_payload));
-
-        if (ua_end == NULL) {               // this is incomplete UA
-            syslog(LOG_INFO, "User-Agent header is not terminated with \\r, mangled to the end.");
-            // send_verdict(queue, pkt, get_next_mark(pkt, true), NULL);
-            // goto end;
+        if (ua_end == NULL) {
+            syslog(LOG_INFO, "User-Agent header is not terminated with \\r, not mangled.");
+            send_verdict(queue, pkt, get_next_mark(pkt, true), NULL);
+            goto end;
         }
-        const unsigned int ua_len = (ua_end != NULL) ? (ua_end - ua_start) : (tcp_payload_len - (ua_start - tcp_payload));
+        const unsigned int ua_len = ua_end - ua_start;
         const unsigned long ua_offset = ua_start - tcp_payload;
 
-        // syslog(LOG_INFO, "Origin UA: %s", ua_start);
-
-        char new_ua_string[ua_len + 1];
-        new_ua_string[ua_len] = 0;
-        bool needed_replace =  append_origin_UA(ua_start, ua_len, new_ua_string);
+        bool needed_replace =  append_origin_UA(ua_start, ua_len, replacement_user_agent_string);
         if (needed_replace) {
-           // Looks it's impossible to mangle packet failed, so we just drop it
+            //syslog(LOG_INFO, "Using disposed UA: %s", replacement_user_agent_string);
+
+            // Looks it's impossible to mangle packet failed, so we just drop it
             if (type == IPV4) {
-<<<<<<< HEAD
                 nfq_tcp_mangle_ipv4(pkt_buff, ua_offset, ua_len, replacement_user_agent_string, ua_len);
             } else if (type == IPV6) {
                 nfq_tcp_mangle_ipv6(pkt_buff, ua_offset, ua_len, replacement_user_agent_string, ua_len);
-=======
-                nfq_tcp_mangle_ipv4(pkt_buff, ua_offset, ua_len, new_ua_string, ua_len);
-            } else {
-                nfq_tcp_mangle_ipv6(pkt_buff, ua_offset, ua_len, new_ua_string, ua_len);
->>>>>>> 7a21d36 (修复高并发引起的写入无效问题)
             }
         } else {
-            // if (ua_len <= 0)
-            //     syslog(LOG_INFO, "empty UA!");
+            //syslog(LOG_INFO, "Using disposed origin UA");
         }
 
-        if (ua_end == NULL) {
-            break;
-        }
         search_length = tcp_payload_len - (ua_end - tcp_payload);
         search_start = ua_end;
     }
