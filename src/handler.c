@@ -292,21 +292,12 @@ void handle_packet(const struct nf_queue *queue, const struct nf_packet *pkt) {
 
     int type;
 
-    // if (use_conntrack) {
-    //     type = pkt->orig.ip_version;
-    // } else {
-    //     const __auto_type ip_hdr = nfq_ip_get_hdr(pkt_buff);
-    //     if (ip_hdr == NULL) {
-    //         type = IPV6;
-    //     } else {
-    //         type = IPV4;
-    //     }
-    // }
-    type = pkt->orig.ip_version;
+    __auto_type ip_hdr = NULL;
 
-    if (!use_conntrack && type == 0) {
-        syslog(LOG_INFO, "try to get ip type through hdr");
-        const __auto_type ip_hdr = nfq_ip_get_hdr(pkt_buff);
+    if (use_conntrack) {
+        type = pkt->orig.ip_version;
+    } else {
+        ip_hdr = nfq_ip_get_hdr(pkt_buff);      // IPV4
         if (ip_hdr == NULL) {
             type = IPV6;
         } else {
@@ -321,13 +312,14 @@ void handle_packet(const struct nf_queue *queue, const struct nf_packet *pkt) {
     }
 
     if (type == IPV4) {
-        const __auto_type ip_hdr = nfq_ip_get_hdr(pkt_buff);
+        if (ip_hdr == NULL)
+            ip_hdr = nfq_ip_get_hdr(pkt_buff);
         if (nfq_ip_set_transport_header(pkt_buff, ip_hdr) < 0) {
             syslog(LOG_ERR, "Failed to set ipv4 transport header");
             goto end;
         }
     } else {
-        const __auto_type ip_hdr = nfq_ip6_get_hdr(pkt_buff);
+        ip_hdr = nfq_ip6_get_hdr(pkt_buff);
         if (nfq_ip6_set_transport_header(pkt_buff, ip_hdr, IPPROTO_TCP) < 0) {
             syslog(LOG_ERR, "Failed to set ipv6 transport header");
             goto end;
