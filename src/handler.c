@@ -40,6 +40,8 @@ bool use_conntrack = false;
 
 static bool cache_initialized = false;
 
+void calculate_replacement_user_agent_string_len();
+
 void init_handler() {
     replacement_user_agent_string = malloc(MAX_USER_AGENT_LENGTH);
 
@@ -73,7 +75,39 @@ void init_handler() {
         syslog(LOG_INFO, "Custom user agent string not set, using default F-string.");
     }
 
+    calculate_replacement_user_agent_string_len();
     syslog(LOG_INFO, "Handler initialized.");
+}
+
+void calculate_replacement_user_agent_string_len() {
+    bool is_bracket_inner = false;
+    bool find_append_symbol = false;        // 找到UA后缀补充标识符
+    char *ua_pointer = replacement_user_agent_string;
+    while (*ua_pointer != 0)
+    {
+        char c = *ua_pointer;
+        if (c == ' ') {
+            if (!is_bracket_inner)
+                replacement_user_agent_blank_record++;      // 记录UA空格
+            // 当出现` ...`时，开启UA后缀补充
+            if (*(ua_pointer + 1) == '.' && *(ua_pointer + 2) == '.' && *(ua_pointer + 3) == '.') {
+                replacement_user_agent_replace_len += 2;
+                find_append_symbol = true;
+                break;
+            }
+        }
+        else if (c == '(') {
+            is_bracket_inner = true;
+        }
+        else if (c == ')') {
+            is_bracket_inner = false;
+        }
+        
+        ua_pointer++;
+        replacement_user_agent_replace_len++;       // 计算replacement_user_agent_string长度（不包含`...`）
+    }
+    if (!find_append_symbol)
+        replacement_user_agent_replace_len = -2;
 }
 
 struct mark_op {
@@ -409,12 +443,13 @@ void handle_packet(const struct nf_queue *queue, const struct nf_packet *pkt) {
         }
 
         const void *ua_end = memchr(ua_start, '\r', tcp_payload_len - (ua_start - tcp_payload));
-        if (ua_end == NULL) {
-            syslog(LOG_INFO, "User-Agent header is not terminated with \\r, not mangled.");
-            send_verdict(queue, pkt, get_next_mark(pkt, true), NULL);
-            goto end;
+
+        if (ua_end == NULL) {               // this is incomplete UA
+            syslog(LOG_INFO, "User-Agent header is not terminated with \\r, mangled to the end.");
+            // send_verdict(queue, pkt, get_next_mark(pkt, true), NULL);
+            // goto end;
         }
-        const unsigned int ua_len = ua_end - ua_start;
+        const unsigned int ua_len = (ua_end != NULL) ? (ua_end - ua_start) : (tcp_payload_len - (ua_start - tcp_payload));
         const unsigned long ua_offset = ua_start - tcp_payload;
 
         bool needed_replace =  append_origin_UA(ua_start, ua_len, replacement_user_agent_string);
@@ -431,6 +466,9 @@ void handle_packet(const struct nf_queue *queue, const struct nf_packet *pkt) {
             //syslog(LOG_INFO, "Using disposed origin UA");
         }
 
+        if (ua_end == NULL) {
+            break;
+        }
         search_length = tcp_payload_len - (ua_end - tcp_payload);
         search_start = ua_end;
     }
